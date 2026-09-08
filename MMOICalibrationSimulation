@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+"""
+ODIN – MMOI Identification Helper (Diagonal Only)
+
+This module does NOT run any simulation or control.
+
+- t_log     : time stamps [s], shape (N,)
+- omega_log : body angular rates from IMU [rad/s], shape (N,3)
+- tau_log   : body torques in body frame [N·m], shape (N,3)
+
+It returns an estimate of the diagonal inertia (Ix, Iy, Iz).
+"""
+
+import numpy as np
+
+# ----------------------------------------------------------------------
+# Optional CAD prior (update these to your latest values if needed)
+# ----------------------------------------------------------------------
+I_BODY_CAD = np.array([
+    0.239,   # Ix [kg·m²]
+    0.315,   # Iy [kg·m²]
+    0.435    # Iz [kg·m²]
+], float)
+
+# Default estimator settings (you can override in the call)
+DEFAULT_LAMBDA_REG = 12.0   # 0 → ignore CAD prior
+DEFAULT_MIN_RATE   = 0.01   # [rad/s]
+DEFAULT_MIN_ACCEL  = 0.01   # [rad/s²]
+DEFAULT_MIN_TAU    = 0.01   # [N·m]
+
+
+# ----------------------------------------------------------------------
+# Numerical derivative
+# ----------------------------------------------------------------------
+def finite_difference(t, y):
+    """
+    Simple finite difference derivative with central differences inside
+    and forward/backward at the ends.
+
+    t : (N,) time vector [s], strictly increasing
+    y : (N,3) or (N,) data
+
+    returns dydt with same shape as y
+    """
+    t = np.asarray(t)
+    y = np.asarray(y)
+
+    if y.ndim == 1:
+        y = y[:, None]
+
+    dt = np.diff(t)
+    if np.any(dt <= 0):
+        raise ValueError("Time vector must be strictly increasing.")
+
+    dydt = np.zeros_like(y)
+
+    # central differences
+    dydt[1:-1] = (y[2:] - y[:-2]) / (t[2:] - t[:-2])[:, None]
+    # forward / backward
+    dydt[0]  = (y[1] - y[0])   / dt[0]
+    dydt[-1] = (y[-1] - y[-2]) / dt[-1]
+
+    return dydt.squeeze()
+
+
+# ----------------------------------------------------------------------
+# Build linear system for diagonal inertia
+# ----------------------------------------------------------------------
+def build_A_b(omega_body, alpha_body, tau_body):
+    """
+    Build A, b for the linear system A * [Ix, Iy, Iz]^T = b
+    using the rigid-body equation with diagonal inertia:
+
+        I * alpha + omega × (I * omega) = tau
+
+    omega_body : (N,3) angular rates [rad/s]
+    alpha_body : (N,3) angular accelerations [rad/s²]
+    tau_body   : (N,3) torques [N·m]
+    """
+    w   = np.asarray(omega_body)
+    a   = np.asarray(alpha_body)
+    tau = np.asarray(tau_body)
+    assert w.shape == a.shape == tau.shape
+
+    N = w.shape[0]
+    A = np.zeros((3 * N, 3), float)
+    b = np.zeros(3 * N, float)
+
+    wx, wy, wz = w[:, 0], w[:, 1], w[:, 2]
+    ax, ay, az = a[:, 0], a[:, 1], a[:, 2]
+    tx, ty, tz = tau[:, 0], tau[:, 1], tau[:, 2]
+
+    wywz = wy * wz
+    wzwx = wz * wx
+    wxwy = wx * wy
+
+    # x equation
+    A[0::3, 0] = ax
+    A[0::3, 1] = -wywz
+    A[0::3, 2] = +wywz
+    b[0::3]    = tx
+
+    # y equation
+    A[1::3, 0] = +wzwx
+    A[1::3, 1] = ay
+    A[1::3, 2] = -wzwx
+    b[1::3]    = ty
+
+    # z equation
+    A[2::3, 0] = -wxwy
+    A[2::3, 1] = +wxwy
+    A[2::3, 2] = az
+    b[2::3]    = tz
+
+    return A, b
+
+
+# ----------------------------------------------------------------------
+# Public estimator function (this is what you call from the big code)
+# ----------------------------------------------------------------------
+def estimate_inertia_diag_from_logs(
+    t_log,
+    omega_log,
+    tau_log,
+    I_cad_diag=I_BODY_CAD,
+    lambda_reg=DEFAULT_LAMBDA_REG,
+    min_rate=DEFAULT_MIN_RATE,
+    min_accel=DEFAULT_MIN_ACCEL,
+    min_tau=DEFAULT_MIN_TAU,
+):
+    """
+    Estimate diagonal inertia from logged data.
+
+    Inputs
+    ------
+    t_log     : (N,) time stamps [s]
+    omega_log : (N,3) body rates from IMU [rad/s]
+    tau_log   : (N,3) body torques [N·m]
+    I_cad_diag: (3,) CAD diagonal inertia [kg·m²] (optional)
+    lambda_reg: regularization weight for CAD prior (0 → ignore prior)
+    min_rate  : minimum |omega| to keep a sample
+    min_accel : minimum |alpha| to keep a sample
+    min_tau   : minimum |tau| to keep a sample
+
+    Returns
+    -------
+    I_est_diag : (3,) regularized estimate [Ix, Iy, Iz]
+    I_data_only: (3,) pure data least-squares estimate
+    alpha_log  : (N,3) angular accelerations used for debugging
+    """
+    t_log     = np.asarray(t_log)
+    omega_log = np.asarray(omega_log)
+    tau_log   = np.asarray(tau_log)
+
+    N = t_log.size
+    if omega_log.shape != (N, 3):
+        raise ValueError("omega_log must be shape (N,3)")
+    if tau_log.shape != (N, 3):
+        raise ValueError("tau_log must be shape (N,3)")
+
+    # numerical angular acceleration
+    alpha_log = finite_difference(t_log, omega_log)
+
+    # basic excitation filters
+    mag_w   = np.linalg.norm(omega_log, axis=1)
+    mag_a   = np.linalg.norm(alpha_log, axis=1)
+    mag_tau = np.linalg.norm(tau_log,   axis=1)
+
+    mask = np.ones(N, dtype=bool)
+    if min_rate  > 0.0: mask &= (mag_w   >= min_rate)
+    if min_accel > 0.0: mask &= (mag_a   >= min_accel)
+    if min_tau   > 0.0: mask &= (mag_tau >= min_tau)
+
+    if np.count_nonzero(mask) < 3:
+        raise RuntimeError("Not enough excited samples for MMOI estimation.")
+
+    omega_use = omega_log[mask]
+    alpha_use = alpha_log[mask]
+    tau_use   = tau_log[mask]
+
+    A, b = build_A_b(omega_use, alpha_use, tau_use)
+
+    # data-only least squares
+    theta_data, *_ = np.linalg.lstsq(A, b, rcond=None)
+
+    # if no prior requested, just return theta_data
+    if I_cad_diag is None or lambda_reg <= 0.0:
+        return theta_data, theta_data, alpha_log
+
+    I_cad_diag = np.asarray(I_cad_diag)
+    if I_cad_diag.shape != (3,):
+        raise ValueError("I_cad_diag must be length-3.")
+
+    ATA  = A.T @ A
+    ATb  = A.T @ b
+    lamI = lambda_reg * np.eye(3)
+    rhs  = ATb + lambda_reg * I_cad_diag
+
+    theta_reg = np.linalg.solve(ATA + lamI, rhs)
+
+    return theta_reg, theta_data, alpha_log
+
+
+# ----------------------------------------------------------------------
+# Example usage (can be removed in production)
+# ----------------------------------------------------------------------
+if __name__ == "__main__":
+    # Dummy example just to show the call signature.
+    # In your real system, you will fill these with logged data.
+    t_demo     = np.linspace(0, 5, 501)
+    omega_demo = np.zeros((t_demo.size, 3))
+    tau_demo   = np.zeros((t_demo.size, 3))
+
+    try:
+        I_est, I_data, alpha = estimate_inertia_diag_from_logs(
+            t_demo, omega_demo, tau_demo
+        )
+        print("I_est_diag :", I_est)
+        print("I_data_only:", I_data)
+    except RuntimeError as e:
+        print("Estimator error (expected with dummy data):", e)

@@ -1,0 +1,4 @@
+This contains the second version of ODIN's tracker as a function. The changes fix YPR/quat output, and add qdot and omega.
+
+John Anderson
+10/17/2025

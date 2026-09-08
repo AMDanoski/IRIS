@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+"""
+test_live_tracker.py — run your DepthAI tracker in live mode.
+Prints quaternion, q̇, ω, and XYZ each frame until Ctrl+C.
+"""
+
+import time
+import numpy as np
+from RunTracker import StartTracker, QueeryTracker, StopTracker, TrackerState
+
+def main():
+    print("=== Starting DepthAI live tracker test ===")
+
+    tracklets_q, start_time, pipeline = StartTracker()
+    state = TrackerState()
+    frame = 0
+    t0 = time.monotonic()
+
+    print(f"{'T[s]':>7} {'FPS':>6} {'Ωx':>9} {'Ωy':>9} {'Ωz':>9} "
+          f"{'|Ω|':>9} {'|q̇|':>10} {'X':>9} {'Y':>9} {'Z':>9}")
+
+    try:
+        while True:
+            out = QueeryTracker(tracklets_q, start_time, state)
+            frame += 1
+
+            omega = np.array([out["OmegaX"], out["OmegaY"], out["OmegaZ"]])
+            qdot = np.array([out["QdotX"], out["QdotY"], out["QdotZ"], out["QdotW"]])
+            omega_mag = np.linalg.norm(omega)
+            qdot_mag = np.linalg.norm(qdot)
+
+            print(f"{out['T']:7.3f} {out['FPS']:6.2f} "
+                  f"{omega[0]:9.4f} {omega[1]:9.4f} {omega[2]:9.4f} "
+                  f"{omega_mag:9.4f} {qdot_mag:10.6f} "
+                  f"{out['X']:9.1f} {out['Y']:9.1f} {out['Z']:9.1f}")
+
+            # Optional: stop after fixed duration (e.g., 10 s)
+            if (time.monotonic() - t0) > 10:
+                break
+
+    except KeyboardInterrupt:
+        print("\nUser interrupted.")
+    finally:
+        StopTracker(pipeline)
+        print("Stopped pipeline cleanly.")
+
+if __name__ == "__main__":
+    main()

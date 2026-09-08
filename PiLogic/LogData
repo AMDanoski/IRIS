@@ -1,0 +1,36 @@
+#JOHN ANDERSON 
+
+
+import csv
+import os
+from datetime import datetime
+
+def LogDataCsv(FileName, Qx, Qy, Qz, Qw, T, X, Y, Z, Yaw, Pitch, Roll):
+    """
+    Append IMU data to CSV file, writing header if file is new.
+
+    Parameters:
+    - FileName: str, CSV file path
+    - Qx, Qy, Qz, Qw: float, quaternion components
+    - T: float or int, timestamp or time value
+    - X, Y, Z: float, spatial coordinates
+    - Yaw, Pitch, Roll: float, Euler angles in degrees
+    """
+    file_exists = os.path.isfile(FileName) and os.path.getsize(FileName) > 0
+
+    with open(FileName, mode='a', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        if not file_exists:
+            writer.writerow([
+                "Timestamp", "Qx", "Qy", "Qz", "Qw", "T", "X", "Y", "Z", "Yaw", "Pitch", "Roll"
+            ])
+
+        Timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+        writer.writerow([
+            Timestamp,
+            f"{Qx:.6f}", f"{Qy:.6f}", f"{Qz:.6f}", f"{Qw:.6f}",
+            T,
+            f"{X:.6f}", f"{Y:.6f}", f"{Z:.6f}",
+            f"{Yaw:.3f}", f"{Pitch:.3f}", f"{Roll:.3f}"
+        ])
